@@ -42,4 +42,4 @@ Hello World
 - GET only
     - other methods and request body is not available :)
 - Headers are not available.
-- User-defined handler will be blocked when accessed simultaneously.
+- Although I/O will not be blocked, user-defined handler will be blocked when accessed simultaneously.
