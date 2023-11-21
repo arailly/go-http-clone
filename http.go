@@ -9,7 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/arailly/go-http-clone/internal/respwriter"
 )
@@ -54,11 +55,11 @@ type Handler interface {
 }
 
 func watch(epollFD, fd int, events int) error {
-	ev := &syscall.EpollEvent{
+	ev := &unix.EpollEvent{
 		Events: uint32(events),
 		Fd:     int32(fd),
 	}
-	err := syscall.EpollCtl(epollFD, syscall.EPOLL_CTL_ADD, fd, ev)
+	err := unix.EpollCtl(epollFD, unix.EPOLL_CTL_ADD, fd, ev)
 	if err != nil {
 		return err
 	}
@@ -66,7 +67,7 @@ func watch(epollFD, fd int, events int) error {
 }
 
 func unwatch(epollFD, fd int) error {
-	err := syscall.EpollCtl(epollFD, syscall.EPOLL_CTL_DEL, fd, nil)
+	err := unix.EpollCtl(epollFD, unix.EPOLL_CTL_DEL, fd, nil)
 	if err != nil {
 		return err
 	}
@@ -75,16 +76,16 @@ func unwatch(epollFD, fd int) error {
 
 func handleAccept(epollFD, fd int) {
 	for {
-		sock, _, err := syscall.Accept(fd)
+		sock, _, err := unix.Accept(fd)
 		if err != nil {
-			if errors.Is(err, syscall.EAGAIN) ||
-				errors.Is(err, syscall.EWOULDBLOCK) {
+			if errors.Is(err, unix.EAGAIN) ||
+				errors.Is(err, unix.EWOULDBLOCK) {
 				return
 			}
 			fmt.Printf("accept error: %v\n", err)
 			return
 		}
-		err = syscall.SetNonblock(sock, true)
+		err = unix.SetNonblock(sock, true)
 		if err != nil {
 			fmt.Printf("setnonblock error: %v\n", err)
 			return
@@ -92,7 +93,7 @@ func handleAccept(epollFD, fd int) {
 		// use edge trigger mode for client socket
 		watch(
 			epollFD, sock,
-			syscall.EPOLLET|syscall.EPOLLIN|syscall.EPOLLOUT,
+			unix.EPOLLET|unix.EPOLLIN|unix.EPOLLOUT,
 		)
 		responseWriterMap.Store(sock, respwriter.NewResponseWriter(sock))
 	}
@@ -117,8 +118,8 @@ func httpRequestCompleted(msg []byte) bool {
 
 func handleShutdownOrClose(epollFD, fd int) error {
 	unwatch(epollFD, fd)
-	syscall.Shutdown(fd, syscall.SHUT_RDWR)
-	syscall.Close(fd)
+	unix.Shutdown(fd, unix.SHUT_RDWR)
+	unix.Close(fd)
 	responseWriterMap.Delete(fd)
 	return nil
 }
@@ -129,9 +130,9 @@ func handleReadableTrigger(epollFD, fd int) {
 	// read until EAGAIN
 	for {
 		msg := make([]byte, batchSize)
-		n, err := syscall.Read(fd, msg)
+		n, err := unix.Read(fd, msg)
 		if err != nil {
-			if errors.Is(err, syscall.EAGAIN) {
+			if errors.Is(err, unix.EAGAIN) {
 				break
 			}
 			fmt.Printf("read error: %v\n", err)
@@ -197,13 +198,13 @@ func handleWritableTrigger(fd int) {
 }
 
 func ListenAndServe(addr string, handler Handler) error {
-	epollFD, err := syscall.EpollCreate1(0)
+	epollFD, err := unix.EpollCreate1(0)
 	if err != nil {
 		return err
 	}
 
 	// setup listen socket
-	listenSock, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
+	listenSock, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM, 0)
 	if err != nil {
 		return err
 	}
@@ -212,29 +213,29 @@ func ListenAndServe(addr string, handler Handler) error {
 	if err != nil {
 		return err
 	}
-	sockaddr := &syscall.SockaddrInet4{
+	sockaddr := &unix.SockaddrInet4{
 		Port: port,
 	}
-	if err := syscall.SetsockoptInt(
+	if err := unix.SetsockoptInt(
 		listenSock,
-		syscall.SOL_SOCKET,
-		syscall.SO_REUSEADDR,
+		unix.SOL_SOCKET,
+		unix.SO_REUSEADDR,
 		1,
 	); err != nil {
 		return err
 	}
-	if err := syscall.SetNonblock(listenSock, true); err != nil {
+	if err := unix.SetNonblock(listenSock, true); err != nil {
 		return err
 	}
-	if err := syscall.Bind(listenSock, sockaddr); err != nil {
+	if err := unix.Bind(listenSock, sockaddr); err != nil {
 		return err
 	}
-	if err := syscall.Listen(listenSock, maxConn); err != nil {
+	if err := unix.Listen(listenSock, maxConn); err != nil {
 		return err
 	}
 
 	// use level trigger mode for listen socket
-	watch(epollFD, listenSock, syscall.EPOLLET|syscall.EPOLLIN)
+	watch(epollFD, listenSock, unix.EPOLLET|unix.EPOLLIN)
 
 	// close all sockets when received SIGINT
 	c := make(chan os.Signal, 1)
@@ -242,21 +243,21 @@ func ListenAndServe(addr string, handler Handler) error {
 	go func() {
 		<-c
 		fmt.Println("terminating...")
-		syscall.Close(epollFD)
-		syscall.Shutdown(listenSock, syscall.SHUT_RDWR)
-		syscall.Close(listenSock)
+		unix.Close(epollFD)
+		unix.Shutdown(listenSock, unix.SHUT_RDWR)
+		unix.Close(listenSock)
 		responseWriterMap.Range(func(key, value interface{}) bool {
 			fd := key.(int)
-			syscall.Shutdown(fd, syscall.SHUT_RDWR)
-			syscall.Close(fd)
+			unix.Shutdown(fd, unix.SHUT_RDWR)
+			unix.Close(fd)
 			return true
 		})
 		os.Exit(0)
 	}()
 
 	for {
-		notifiedEvents := make([]syscall.EpollEvent, maxConn+1)
-		n, err := syscall.EpollWait(epollFD, notifiedEvents, -1)
+		notifiedEvents := make([]unix.EpollEvent, maxConn+1)
+		n, err := unix.EpollWait(epollFD, notifiedEvents, -1)
 		if err != nil {
 			fmt.Printf("epoll_wait error: %v\n", err)
 			return err
@@ -267,14 +268,14 @@ func ListenAndServe(addr string, handler Handler) error {
 			events := notifiedEvents[i].Events
 			fd := int(notifiedEvents[i].Fd)
 
-			if events&syscall.EPOLLIN != 0 {
+			if events&unix.EPOLLIN != 0 {
 				if fd == listenSock {
 					handleAccept(epollFD, fd)
 					continue
 				}
 				handleReadableTrigger(epollFD, fd)
 			}
-			if events&syscall.EPOLLOUT != 0 {
+			if events&unix.EPOLLOUT != 0 {
 				handleWritableTrigger(fd)
 			}
 			// not interested in EPOLLRDHUP
